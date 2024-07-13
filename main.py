@@ -112,9 +112,18 @@ def signal_handler(_signal, _frame):
 signal.signal(signal.SIGTERM, signal_handler)
 
 
+def is_process_running(pid):
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    else:
+        return True
+
 def display_info():
     global start_display_time
     time.sleep(5)
+    file_size = defaultdict(dict)
     while True:
         try:
             time.sleep(5)
@@ -152,9 +161,65 @@ def display_info():
                     no_repeat_recording = list(set(recording))
                     print(f"正在录制{len(no_repeat_recording)}个直播: ")
                     for recording_live in no_repeat_recording:
-                        rt, qa = recording_time_list[recording_live]
+                        rt, qa, pid, save_path_name = recording_time_list[recording_live]
                         have_record_time = now_time - rt
-                        print(f"{recording_live}[{qa}] 正在录制中 " + str(have_record_time).split('.')[0])
+                        have_record_time_seconds = have_record_time.total_seconds()
+                        print(have_record_time_seconds)
+
+                        # 分段录制开启
+                        if split_video_by_time:
+                            # 正确的文件名
+                            correct_split = int(have_record_time_seconds) // int(split_time)
+                            current_path = save_path_name % correct_split
+
+                            # 寻找分P
+                            new_split = correct_split
+                            newest_path_name = save_path_name % new_split
+                            while os.path.exists(newest_path_name):
+                                new_split += 1
+                                newest_path_name = save_path_name % new_split
+
+                            # 出现了分P，即 _001, _002, _003，说明直播间卡了，直接kill，及时止损
+                            # 否则及时录制了，时间轴也会出错
+                            if new_split - correct_split > 2: # 按理来说 条件应该为 '> 1'，但是防止边界情况，设置为 '> 2'
+                                file_size.pop(current_path, None)
+                                print(f"Process {pid} killed as {current_path} 出现了卡顿.")
+                                os.kill(pid, signal.SIGTERM)
+                        else:
+                            # 分段录制没开启
+                            current_path = save_path_name
+
+                        # 直播间已经关播了，但是ffmpeg进程一直退出不了。
+                        # 如果开启了分段录制，那么下一个分段的文件名一定不会存在，直接kill
+                        # 如果没开启分段录制，文件大小一定不会增加
+                        if not os.path.exists(current_path):
+                            file_size.pop(current_path, None)
+                            print(f"Process {pid} killed as {current_path} 不存在，直播间可能已关闭.")
+                            if is_process_running(pid):
+                                os.kill(pid, signal.SIGTERM)
+                        else:
+                            current_size = os.path.getsize(current_path)
+
+                            if not current_path in file_size:
+                                file_size[current_path]['size'] = current_size
+                                file_size[current_path]['time'] = now_time
+                            else:
+                                # 文件没有新录制的内容
+                                if current_size - file_size[current_path]['size'] < 1:
+                                    # 并且距离上次更新过了180s，直接kill对应的process
+                                    # 因为我发现，ffmpeg进程有时候会延迟2分钟左右退出，给ffmpeg进程正常退出留出一点缓冲的时间
+                                    if (now_time - file_size[current_path]['time']).total_seconds() > 180:
+                                        if is_process_running(pid):
+                                            os.kill(pid, signal.SIGTERM)
+                                        file_size.pop(current_path, None)
+                                        print(f"Process {pid} killed as {current_path} 文件大小没有增长.")
+                                else:
+                                    file_size[current_path]['size'] = current_size
+                                    file_size[current_path]['time'] = now_time
+
+                        print(f"{recording_live}[{qa}] 正在录制中 pid:{pid} filesize: {current_size} " + str(have_record_time).split('.')[0])
+
+
 
                     # print('\n本软件已运行：'+str(now_time - start_display_time).split('.')[0])
                     print("x" * 60)
@@ -1390,10 +1455,23 @@ def start_record(url_data: tuple, count_variable: int = -1):
                                         ]
 
                                         ffmpeg_command.extend(command)
-                                        _output = subprocess.check_output(ffmpeg_command,
-                                                                          stderr=subprocess.STDOUT)
+                                        # _output = subprocess.check_output(ffmpeg_command,
+                                        #                                   stderr=subprocess.STDOUT)
+
+                                        process  = subprocess.Popen(ffmpeg_command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                                        recording_time_list[record_name].append(process.pid)
+                                        recording_time_list[record_name].append(save_path_name)
+                                        _output, _error = process.communicate()
+                                        print(process.returncode)
+                                        if process.returncode != 0:
+                                            raise subprocess.CalledProcessError(process.returncode, ffmpeg_command, output=_error)
+
                                         record_finished = True
 
+                                        if ts_to_mp4:
+                                            threading.Thread(target=converts_mp4, args=(save_file_path,)).start()
+                                        if ts_to_m4a:
+                                            threading.Thread(target=converts_m4a, args=(save_file_path,)).start()
                                     except subprocess.CalledProcessError as e:
                                         logger.error(
                                             f"错误信息: {e} 发生错误的行数: {e.__traceback__.tb_lineno}")
@@ -1421,15 +1499,22 @@ def start_record(url_data: tuple, count_variable: int = -1):
                                             "-f", "mpegts",
                                             "{path}".format(path=save_file_path),
                                         ]
-
                                         ffmpeg_command.extend(command)
-                                        _output = subprocess.check_output(ffmpeg_command, stderr=subprocess.STDOUT)
-                                        record_finished = True
-
+                                        process = subprocess.Popen(ffmpeg_command, stdout=subprocess.PIPE,
+                                                                   stderr=subprocess.PIPE)
+                                        recording_time_list[record_name].append(process.pid)
+                                        recording_time_list[record_name].append(save_file_path)
+                                        _output, _error = process.communicate()
+                                        print(process.returncode)
+                                        if process.returncode != 0:
+                                            raise subprocess.CalledProcessError(process.returncode, ffmpeg_command,
+                                                                                output=_error)
                                         if ts_to_mp4:
                                             threading.Thread(target=converts_mp4, args=(save_file_path,)).start()
                                         if ts_to_m4a:
                                             threading.Thread(target=converts_m4a, args=(save_file_path,)).start()
+                                        record_finished = True
+
                                     except subprocess.CalledProcessError as e:
                                         logger.error(f"错误信息: {e} 发生错误的行数: {e.__traceback__.tb_lineno}")
                                         warning_count += 1
@@ -1449,6 +1534,9 @@ def start_record(url_data: tuple, count_variable: int = -1):
                             else:
                                 print(
                                     f"\n{anchor_name} {time.strftime('%Y-%m-%d %H:%M:%S')} 直播录制出错,请检查网络\n")
+
+                            with conditions[count_variable]:
+                                global_port_info[record_url]['is_live'] = False
 
                             record_finished_2 = False
 
@@ -1761,6 +1849,7 @@ if __name__ == '__main__':
             with open(url_config_file, "r", encoding=encoding, errors='ignore') as file: # ??? 又重新读了一遍
                 for line in file:
                     line = line.strip()
+
                     if line.startswith("#") or len(line) < 20:
                         continue
 
