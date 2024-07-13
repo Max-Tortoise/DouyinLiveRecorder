@@ -164,7 +164,6 @@ def display_info():
                         rt, qa, pid, save_path_name = recording_time_list[recording_live]
                         have_record_time = now_time - rt
                         have_record_time_seconds = have_record_time.total_seconds()
-                        print(have_record_time_seconds)
 
                         # 分段录制开启
                         if split_video_by_time:
@@ -181,10 +180,12 @@ def display_info():
 
                             # 出现了分P，即 _001, _002, _003，说明直播间卡了，直接kill，及时止损
                             # 否则及时录制了，时间轴也会出错
-                            if new_split - correct_split > 2: # 按理来说 条件应该为 '> 1'，但是防止边界情况，设置为 '> 2'
+                            if new_split - correct_split > 3: # 按理来说 条件应该为 '> 1'，但是防止边界情况，设置为 '> 3'
                                 file_size.pop(current_path, None)
                                 print(f"Process {pid} killed as {current_path} 出现了卡顿.")
                                 os.kill(pid, signal.SIGTERM)
+
+                                continue
                         else:
                             # 分段录制没开启
                             current_path = save_path_name
@@ -193,6 +194,15 @@ def display_info():
                         # 如果开启了分段录制，那么下一个分段的文件名一定不会存在，直接kill
                         # 如果没开启分段录制，文件大小一定不会增加
                         if not os.path.exists(current_path):
+                            # 给ffmpeg进程1分钟的启动时间
+                            if split_video_by_time:
+                                if (int(have_record_time_seconds) -
+                                 int(have_record_time_seconds) // int(split_time) * int(split_time)) < 60:
+                                    continue
+                            else:
+                                if int(have_record_time_seconds) < 60:
+                                    continue
+
                             file_size.pop(current_path, None)
                             print(f"Process {pid} killed as {current_path} 不存在，直播间可能已关闭.")
                             if is_process_running(pid):
