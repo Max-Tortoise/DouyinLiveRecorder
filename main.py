@@ -163,6 +163,9 @@ def display_info():
                     for recording_live in no_repeat_recording:
                         rt, qa, pid, save_path_name = recording_time_list[recording_live]
                         have_record_time = now_time - rt
+                        print(f"{recording_live}[{qa}] 正在录制中 pid:{pid} " +
+                              str(have_record_time).split('.')[0])
+                        
                         have_record_time_seconds = have_record_time.total_seconds()
 
                         # 分段录制开启
@@ -227,7 +230,7 @@ def display_info():
                                     file_size[current_path]['size'] = current_size
                                     file_size[current_path]['time'] = now_time
 
-                        print(f"{recording_live}[{qa}] 正在录制中 pid:{pid} filesize: {current_size} " + str(have_record_time).split('.')[0])
+
 
 
 
